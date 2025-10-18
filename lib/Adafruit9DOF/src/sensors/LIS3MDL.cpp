@@ -48,18 +48,13 @@ bool LIS3MDL::begin(TwoWire &wirePort) {
 void LIS3MDL::readMag(float &mx, float &my, float &mz) {
 	uint8_t data[6];
 	readRegisters(OUTX_L, data, 6);
-	Serial.print("LIS3MDL Mag raw: ");
-	for (int i = 0; i < 6; i++) {
-		Serial.print(data[i], HEX); Serial.print(" ");
-	}
-	Serial.println();
 
 	int16_t rawX = (int16_t)(data[1] << 8 | data[0]);
 	int16_t rawY = (int16_t)(data[3] << 8 | data[2]);
 	int16_t rawZ = (int16_t)(data[5] << 8 | data[4]);
 
 	// ±4 gauss range → 0.14 mgauss/LSB
-	const float scale = 0.14f; // mgauss per LSB
+	const float scale = 0.014f; // mgauss per LSB
 	mx = rawX * scale;
 	my = rawY * scale;
 	mz = rawZ * scale;

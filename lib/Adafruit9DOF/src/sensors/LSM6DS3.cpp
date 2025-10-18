@@ -49,11 +49,7 @@ bool LSM6DS3::begin(TwoWire &wirePort) {
 void LSM6DS3::readAccel(float &ax, float &ay, float &az) {
     uint8_t data[6];
     readRegisters(OUTX_L_XL, data, 6);
-    Serial.print("LSM6DS3 Accel raw: ");
-    for (int i = 0; i < 6; i++) {
-        Serial.print(data[i], HEX); Serial.print(" ");
-    }
-    Serial.println();
+    
 
     int16_t rawX = (int16_t)(data[1] << 8 | data[0]);
     int16_t rawY = (int16_t)(data[3] << 8 | data[2]);
@@ -69,11 +65,6 @@ void LSM6DS3::readAccel(float &ax, float &ay, float &az) {
 void LSM6DS3::readGyro(float &gx, float &gy, float &gz) {
     uint8_t data[6];
     readRegisters(OUTX_L_G, data, 6);
-    Serial.print("LSM6DS3 Gyro raw: ");
-    for (int i = 0; i < 6; i++) {
-        Serial.print(data[i], HEX); Serial.print(" ");
-    }
-    Serial.println();
 
     int16_t rawX = (int16_t)(data[1] << 8 | data[0]);
     int16_t rawY = (int16_t)(data[3] << 8 | data[2]);
