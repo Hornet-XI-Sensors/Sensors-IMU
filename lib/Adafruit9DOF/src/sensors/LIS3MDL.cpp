@@ -46,19 +46,21 @@ bool LIS3MDL::begin(TwoWire &wirePort) {
 }
 
 void LIS3MDL::readMag(float &mx, float &my, float &mz) {
-	uint8_t data[6];
-	readRegisters(OUTX_L, data, 6);
+    uint8_t data[6];
+    readRegisters(OUTX_L, data, 6);
 
-	int16_t rawX = (int16_t)(data[1] << 8 | data[0]);
-	int16_t rawY = (int16_t)(data[3] << 8 | data[2]);
-	int16_t rawZ = (int16_t)(data[5] << 8 | data[4]);
+    int16_t rawX = (int16_t)(data[1] << 8 | data[0]);
+    int16_t rawY = (int16_t)(data[3] << 8 | data[2]);
+    int16_t rawZ = (int16_t)(data[5] << 8 | data[4]);
 
-	// ±4 gauss range → 0.14 mgauss/LSB
-	const float scale = 0.014f; // mgauss per LSB
-	mx = rawX * scale;
-	my = rawY * scale;
-	mz = rawZ * scale;
+    // LIS3MDL, FS = ±4 gauss -> sensitivity = 0.14 mG/LSB = 0.00014 G/LSB
+    // 1 gauss = 100 microtesla (µT) -> 0.00014 G * 100 µT/G = 0.014 µT per LSB
+    const float SCALE_UT_PER_LSB = 0.014f; // µT / LSB
+    mx = rawX * SCALE_UT_PER_LSB;
+    my = rawY * SCALE_UT_PER_LSB;
+    mz = rawZ * SCALE_UT_PER_LSB;
 }
+
 
 void LIS3MDL::writeRegister(uint8_t reg, uint8_t value) {
 	wire->beginTransmission(addr);

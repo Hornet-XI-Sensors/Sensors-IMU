@@ -1,0 +1,27 @@
+{
+	"folders": [
+		{
+			"path": "../../../Teensy4.1 Sensor Fusion"
+		},
+		{
+			"name": "Teensy4.1_SensorFusion",
+			"path": "."
+		}
+	],
+	"settings": {
+		"files.associations": {
+			"array": "cpp",
+			"deque": "cpp",
+			"list": "cpp",
+			"string": "cpp",
+			"unordered_map": "cpp",
+			"unordered_set": "cpp",
+			"vector": "cpp",
+			"string_view": "cpp",
+			"hash_map": "cpp",
+			"initializer_list": "cpp",
+			"valarray": "cpp",
+			"cmath": "cpp"
+		}
+	}
+}
