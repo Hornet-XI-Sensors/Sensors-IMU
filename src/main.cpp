@@ -1,159 +1,87 @@
 #include <Arduino.h>
-#include "Adafruit9DOF.h"
-#include "EKF.h"
-#include "MS5837.h"
-#include "SdFat.h"
 #include <Wire.h>
+#include "Adafruit9DOF.h"
+#include "MadgwickAHRS.h"
+#include <math.h>
 
-#ifdef SDCARD_SS_PIN
-const uint8_t SD_CS_PIN = SDCARD_SS_PIN;
-#endif // SDCARD_SS_PIN
-#define SPI_CLOCK SD_SCK_MHZ(50)
-#define SD_CONFIG SdioConfig(FIFO_SDIO)
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
-SdFs sd;
-FsFile newFile;
+// Create sensor object
+Adafruit9DOF imu;
 
-double prevTime = 0;
-double curTime  = 0;
-double diff     = 0;
-//double hz       = 0;
+// Timing for 50Hz updates
+const unsigned long period = 20; // milliseconds (50Hz)
+static unsigned long last_update = 0;
 
-long i = 0;
+// Function to convert quaternion to Euler angles (roll, pitch, yaw)
+void quaternionToEuler(float q0, float q1, float q2, float q3, float& roll, float& pitch, float& yaw) {
+    // Roll (X-axis rotation)
+    roll = atan2(2.0f * (q0 * q1 + q2 * q3), 1.0f - 2.0f * (q1 * q1 + q2 * q2));
 
-#define WIRE Wire
+    // Pitch (Y-axis rotation)
+    float sinp = 2.0f * (q0 * q2 - q3 * q1);
+    if (sinp >= 1.0f) {
+        pitch = M_PI / 2.0f;
+    } else if (sinp <= -1.0f) {
+        pitch = -M_PI / 2.0f;
+    } else {
+        pitch = asin(sinp);
+    }
 
-// create EKF object
-EKF ekf;
-Adafruit9DOF fusion;
-MS5837 bar30;
+    // Yaw (Z-axis rotation)
+    yaw = atan2(2.0f * (q0 * q3 + q1 * q2), 1.0f - 2.0f * (q2 * q2 + q3 * q3));
 
-int val;
-float calc;
-float scaledup;
-float pres;
-
-
-const unsigned long period = 10; // milliseconds (100Hz)
-static unsigned long start_time = millis();
+    // Convert to degrees
+    roll *= 180.0f / M_PI;
+    pitch *= 180.0f / M_PI;
+    yaw *= 180.0f / M_PI;
+}
 
 void setup() {
     Serial.begin(115200);
-    // initialize IMU
     while (!Serial); // Wait for Serial to be ready
 
-    WIRE.begin();
+    Wire.begin();
 
-    if (!fusion.begin()) {
-        Serial.println("Sensor init failed!");
-        while (1);
-    }
-    Serial.println("Sensor init OK!");
-
-    if (!bar30.init()) {
-        Serial.println("Bar30 init failed!");
+    if (!imu.begin()) {
+        Serial.println("Adafruit 9DOF initialization failed!");
         while (1);
     }
 
-    if (!sd.begin(SD_CONFIG)) {
-      return;
-    }
-
-    newFile = sd.open("log.txt", FILE_WRITE);
-    Serial.println("Bar30 init OK!");
-    bar30.setFluidDensity(997); // freshwater
+    Serial.println("Adafruit 9DOF initialized successfully!");
+    Serial.println("Roll\tPitch\tYaw");
 }
 
 void loop() {
-    static unsigned long now = millis(); // Reset start time each loop
-    float gx, gy, gz;
-    float ax, ay, az;
-    float mx, my, mz;
-    fusion.readAll(ax, ay, az, gx, gy, gz, mx, my, mz);
-    if (millis() - start_time >= period) {
-        // read depth
-        bar30.read();
-        float depth = bar30.depth();
-        float pressure = bar30.pressure(); // mbar
-        float temp = bar30.temperature(); // deg C
+    if (millis() - last_update >= period) {
+        // Read sensor data
+        float ax, ay, az; // accelerometer
+        float gx, gy, gz; // gyroscope
+        float mx, my, mz; // magnetometer
 
-        // read internal hull pressure
-        val = analogRead(A0); 
-        calc = (val/1023.0) * (3.3);
-        scaledup = calc * 1.5;
-        pres = (scaledup+0.204)/0.0204;
+        imu.readAll(ax, ay, az, gx, gy, gz, mx, my, mz);
 
-        // convert to EKF vectors
+        // Convert gyroscope from degrees/s to radians/s for Madgwick
         float gx_rad = gx * DEG_TO_RAD;
         float gy_rad = gy * DEG_TO_RAD;
         float gz_rad = gz * DEG_TO_RAD;
 
-        float norm_acc = sqrt(ax*ax + ay*ay + az*az);
-        if (norm_acc == 0){
-            norm_acc = 1; // prevent division by zero
-        } 
-        float axn = ax / norm_acc;
-        float ayn = ay / norm_acc;
-        float azn = az / norm_acc;
+        // Update Madgwick AHRS algorithm
+        MadgwickAHRSupdate(gx_rad, gy_rad, gz_rad, ax, ay, az, mx, my, mz);
 
-        float roll_acc  = atan2(ayn, azn);
-        float pitch_acc = atan2(-axn, sqrt(ayn*ayn + azn*azn));
+        // Convert quaternion to Euler angles
+        float roll, pitch, yaw;
+        quaternionToEuler(q0, q1, q2, q3, roll, pitch, yaw);
 
-        float Xh = mx * cos(pitch_acc) + mz * sin(pitch_acc);
-        float Yh = mx * sin(roll_acc)*sin(pitch_acc) + my*cos(roll_acc) - mz*sin(roll_acc)*cos(pitch_acc);
-        float yaw_mag = atan2(-Yh, Xh);
-
-        EKF::StateVector u = {gx_rad, gy_rad, gz_rad, ax, ay, az};
-        EKF::MeasVector z  = {roll_acc, pitch_acc, yaw_mag, 0, 0, 0};
-        
-
-        // update EKF
-        float dt = 0.01f; 
-        ekf.predict(u, dt);
-        ekf.update(z);
-
-        // get filtered orientation
-        auto x = ekf.getState();
-        for(int i=0;i<3;i++) Serial.print(x[i]*57.2958f,4), Serial.print("\t");
-        
-
-        //Linear Velocities
-        Serial.print(x[6]);
+        // Print the corrected Roll, Pitch, Yaw values
+        Serial.print(roll, 4);
         Serial.print("\t");
-        Serial.print(x[7]);
+        Serial.print(pitch, 4);
         Serial.print("\t");
-        Serial.print(x[8]);
+        Serial.println(yaw, 4);
 
-        //Print Bar 30 Depth
-        Serial.print("\t");
-        Serial.print(depth);
-        Serial.print("\t");
-        Serial.println(pres); // internal hull pressure
-        now = millis();
-        start_time = now;
-    };
-
-    unsigned long timestamp = millis();
-    prevTime = micros();
-  
-    newFile.print(timestamp);
-    newFile.print("\t");
-    newFile.print(ax);
-    newFile.print("\t");
-    newFile.print(ay);
-    newFile.print("\t");
-    newFile.print(az);
-    newFile.print("\t");
-    newFile.print(gx);
-    newFile.print("\t");        
-    newFile.print(gy);
-    newFile.print("\t");
-    newFile.println(gz);
-    i++;
-
-    if (!(i % 100)){
-    newFile.flush();
-    newFile.close();
-    newFile = sd.open("log.txt", FILE_WRITE);
+        last_update = millis();
     }
 }
