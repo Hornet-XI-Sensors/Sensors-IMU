@@ -50,10 +50,7 @@ void setup() {
     }
     Serial.println("Sensor init OK!");
 
-    if (!bar30.init()) {
-        Serial.println("Bar30 init failed!");
-        while (1);
-    }
+    bar30.init();
 
     if (!sd.begin(SD_CONFIG)) {
       return;
@@ -114,8 +111,7 @@ void loop() {
 
         // get filtered orientation
         auto x = ekf.getState();
-        for(int i=0;i<3;i++) Serial.print(x[i]*57.2958f,4), Serial.print("\t");
-        
+        for(int i=0;i<2;i++) Serial.print(x[i]*57.2958f,4), Serial.print("\t");
 
         //Linear Velocities
         Serial.print(x[6]);

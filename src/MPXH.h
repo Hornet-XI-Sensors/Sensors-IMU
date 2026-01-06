@@ -1,8 +1,6 @@
 #include <Wire.h>
 #include "SdFat.h"
 
-
-
 #ifdef SDCARD_SS_PIN
 const uint8_t SD_CS_PIN = SDCARD_SS_PIN;
 #endif // SDCARD_SS_PIN
@@ -35,7 +33,6 @@ void setup() {
   newFile = sd.open("log.txt", FILE_WRITE);
 }
 
-
 void loop() {
   // byte error, address;
   // int nDevices;
@@ -58,7 +55,7 @@ void loop() {
     newFile = sd.open("log.txt", FILE_WRITE);
   }
 
- // Serial.println("Scanning...");
+// Serial.println("Scanning...");
 
 //   nDevices = 0;
 //   for(address = 1; address < 127; address++ )
