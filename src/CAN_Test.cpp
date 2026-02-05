@@ -197,24 +197,15 @@ void send_depth_frame(float depth_m, uint16_t &counter_ref)
 
 void setup()
 {
+  //Initialize Serial, I2C, and Sensors
   Serial.begin(115200);
-  while (!Serial)
-    ; // Wait for Serial to be ready
-
   Wire.begin();
-
-  if (!imu.begin())
-  {
-    Serial.println("Adafruit 9DOF initialization failed!");
-    while (1)
-      ;
-  }
-
+  while (!Serial)
+  imu.begin();
+  Serial.println("9DOF IMU init OK!");
   bar30.init();
   Serial.println("Bar30 init OK!");
   bar30.setFluidDensity(997); // freshwater is 997 air is 1225
-
-  // TODO: add remaining sensors set up
 
   Can0.begin();                  // turns on can hardware
   Can0.setBaudRate(CAN_BITRATE); // sets can timing to match can bus - 1 mbps rn
@@ -235,7 +226,6 @@ void loop()
     imu.readAll(ax, ay, az, gx, gy, gz, mx, my, mz);
 
     bar30.read();
-    float depth = bar30.depth(); // units in meters(m)
 
     // Convert gyroscope from degrees/s to radians/s for Madgwick
     float gx_rad = gx * DEG_TO_RAD;
@@ -243,7 +233,7 @@ void loop()
     float gz_rad = gz * DEG_TO_RAD;
 
     // Update Madgwick AHRS algorithm
-    MadgwickAHRSupdateIMU(gx_rad, gy_rad, gz_rad, ax, ay, az);
+    MadgwickAHRSupdate(gx_rad, gy_rad, gz_rad, ax, ay, az, mx, my, mz);
 
     // Convert quaternion to Euler angles
     float roll, pitch, yaw;
@@ -265,13 +255,15 @@ void loop()
     send_pressure_frame(pres, ctr_pressure);
     send_depth_frame(depth_m, ctr_depth);
     
+    
     //For Checking Purpose
     Serial.print(roll, 4);
     Serial.print(pitch, 4);
-    Serial.print(yaw, 4);
-    Serial.print(pres);
-    Serial.println(depth);
-
+    Serial.println(yaw, 4);
+    //Serial.print(pres);
+    //Serial.println(depth_m);
+    
+   
     last_update = millis();
   }
 }

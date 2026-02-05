@@ -15,6 +15,22 @@ Adafruit9DOF imu;
 const unsigned long period = 20; // milliseconds (50Hz)
 static unsigned long last_update = 0;
 
+void SoftIron(float &mx, float &my, float &mz)
+{
+    //change values of matrix according to soft iron calibration
+    const float A11 = 1.03f, A12 = 0.01f, A13 = -0.02f;
+    const float A21 = 0.01f, A22 = 0.98f, A23 =  0.00f;
+    const float A31 = -0.02f, A32 = 0.00f, A33 = 1.01f;
+
+    float x = mx;
+    float y = my;
+    float z = mz;
+
+    mx = A11*x + A12*y + A13*z;
+    my = A21*x + A22*y + A23*z;
+    mz = A31*x + A32*y + A33*z;
+}
+
 // Function to convert quaternion to Euler angles (roll, pitch, yaw)
 void quaternionToEuler(float q0, float q1, float q2, float q3, float& roll, float& pitch, float& yaw) {
     // Roll (X-axis rotation)
