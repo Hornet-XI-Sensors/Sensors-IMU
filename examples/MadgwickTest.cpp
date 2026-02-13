@@ -1,103 +1,309 @@
-#include <Arduino.h>
+#include <FlexCAN_T4.h>
 #include <Wire.h>
+#include <MS5837.h>
+#include <Arduino.h>
 #include "Adafruit9DOF.h"
 #include "MadgwickAHRS.h"
+#include "SparkFun_BMI270_Arduino_Library.h"
 #include <math.h>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
+#define WIRE Wire
 
-// Create sensor object
+// Create object
 Adafruit9DOF imu;
+BMI270 imu2;
+MS5837 bar30;
+
+int val;
+float calc;
+float scaledup;
+float pres;
+
+uint8_t i2cAddress = BMI2_I2C_PRIM_ADDR;
 
 // Timing for 50Hz updates
-const unsigned long period = 20; // milliseconds (50Hz)
+const unsigned long period = 10; // milliseconds (50Hz)
 static unsigned long last_update = 0;
 
-void SoftIron(float &mx, float &my, float &mz)
-{
-    //change values of matrix according to soft iron calibration
-    const float A11 = 1.03f, A12 = 0.01f, A13 = -0.02f;
-    const float A21 = 0.01f, A22 = 0.98f, A23 =  0.00f;
-    const float A31 = -0.02f, A32 = 0.00f, A33 = 1.01f;
+/*
+TLDR
+Each of the 5 sensor values have been matched to one diff frame each
+This is cause for roll pitch yaw, if i convert decimal into  int, it becomes a 32 bit unsigned integer which takes up 4 bytes alr out of 8 for the can bus frame
+Im also adding a counter for debugging so thats 2 more bytes and then rest 2 are rserrved
+So to be safe, 1 frame per value is better, esp since we have leeway for 3703 frames / second at 50% bus utilisation recommendation
+*/
 
-    float x = mx;
-    float y = my;
-    float z = mz;
+// can controller
+FlexCAN_T4<CAN1, RX_SIZE_256, TX_SIZE_16> Can0;
 
-    mx = A11*x + A12*y + A13*z;
-    my = A21*x + A22*y + A23*z;
-    mz = A31*x + A32*y + A33*z;
+// CAN set up
+static const uint32_t CAN_BITRATE = 1000000; // 1 Mbps
+
+// messages ids
+static const uint32_t CAN_ID_ROLL = 0x300;
+static const uint32_t CAN_ID_PITCH = 0x301;
+static const uint32_t CAN_ID_YAW = 0x302;
+static const uint32_t CAN_ID_PRESSURE = 0x303;
+static const uint32_t CAN_ID_DEPTH = 0x304;
+
+// scaling factors to convert float to integer
+static const float SCALE_RPY = 10000.0f; // for 4 dp
+static const float SCALE_PD = 100.0f;    // for 2 dp
+
+// timings
+const unsigned long period_ms = 20; // 50 Hz corresponds to a period of 20ms
+
+// separate counters per message ID (will help debugging any frame drops per stream, especially as sending more data now)
+static uint16_t ctr_roll = 0;
+static uint16_t ctr_pitch = 0;
+static uint16_t ctr_yaw = 0;
+static uint16_t ctr_pressure = 0;
+static uint16_t ctr_depth = 0;
+// mag hard iron and soft iron biases
+static const float bias[3] = {
+  -14.049434f,  2.764056f, -60.358348f
+};
+
+static const float Ainv[3][3] = {
+  { 1.869998f, -0.049957f, -0.064656f },
+  { -0.049957f,  1.439493f,  0.174199f },
+  { -0.064656f,  0.174199f,  1.460782f }
+};
+// callibration matrix to correct magneto 
+static void mag_calibrate_ut(float magneto[3], float cal[3]) {
+  float v0 = magneto[0] - bias[0];
+  float v1 = magneto[1] - bias[1];
+  float v2 = magneto[2] - bias[2];
+  cal[0] = Ainv[0][0]*v0 + Ainv[0][1]*v1 + Ainv[0][2]*v2;
+  cal[1] = Ainv[1][0]*v0 + Ainv[1][1]*v1 + Ainv[1][2]*v2;
+  cal[2] = Ainv[2][0]*v0 + Ainv[2][1]*v1 + Ainv[2][2]*v2;
 }
-
+// helpers to convert our numercial sensor values into CANBUS byte formats
 // Function to convert quaternion to Euler angles (roll, pitch, yaw)
-void quaternionToEuler(float q0, float q1, float q2, float q3, float& roll, float& pitch, float& yaw) {
-    // Roll (X-axis rotation)
-    roll = atan2(2.0f * (q0 * q1 + q2 * q3), 1.0f - 2.0f * (q1 * q1 + q2 * q2));
+void quaternionToEuler(float q0, float q1, float q2, float q3, float &roll, float &pitch, float &yaw)
+{
+  // Roll (X-axis rotation)
+  roll = atan2(2.0f * (q0 * q1 + q2 * q3), 1.0f - 2.0f * (q1 * q1 + q2 * q2));
 
-    // Pitch (Y-axis rotation)
-    float sinp = 2.0f * (q0 * q2 - q3 * q1);
-    if (sinp >= 1.0f) {
-        pitch = M_PI / 2.0f;
-    } else if (sinp <= -1.0f) {
-        pitch = -M_PI / 2.0f;
-    } else {
-        pitch = asin(sinp);
-    }
+  // Pitch (Y-axis rotation)
+  float sinp = 2.0f * (q0 * q2 - q3 * q1);
+  if (sinp >= 1.0f)
+  {
+    pitch = M_PI / 2.0f;
+  }
+  else if (sinp <= -1.0f)
+  {
+    pitch = -M_PI / 2.0f;
+  }
+  else
+  {
+    pitch = asin(sinp);
+  }
 
-    // Yaw (Z-axis rotation)
-    yaw = atan2(2.0f * (q0 * q3 + q1 * q2), 1.0f - 2.0f * (q2 * q2 + q3 * q3));
+  // Yaw (Z-axis rotation)
+  yaw = atan2(2.0f * (q0 * q3 + q1 * q2), 1.0f - 2.0f * (q2 * q2 + q3 * q3));
 
-    // Convert to degrees
-    roll *= 180.0f / M_PI;
-    pitch *= 180.0f / M_PI;
-    yaw *= 180.0f / M_PI;
+  // Convert to degrees
+  roll *= 180.0f / M_PI;
+  pitch *= 180.0f / M_PI;
+  yaw *= 180.0f / M_PI;
 }
 
-void setup() {
-    Serial.begin(115200);
-    while (!Serial); // Wait for Serial to be ready
-
-    Wire.begin();
-
-    if (!imu.begin()) {
-        Serial.println("Adafruit 9DOF initialization failed!");
-        while (1);
-    }
-
-    Serial.println("Adafruit 9DOF initialized successfully!");
-    Serial.println("Roll\tPitch\tYaw");
+// helper: to write uint16 as little-endian into buf at index i
+static inline void put_u16_le(uint8_t *buf, int i, uint16_t v)
+{                                          // buf - pointer to can data array (msg.buf[i]) // i - starting index // v - the sensor numerical
+  buf[i + 0] = (uint8_t)(v & 0xFF);        // extracts the lowest 8 bits thus creating LSB (least significant byte)
+  buf[i + 1] = (uint8_t)((v >> 8) & 0xFF); // shifts right by 8 and masks with 0xFF to extract only 8 bits, thus creating MSB most significant byte
 }
 
-void loop() {
-    if (millis() - last_update >= period) {
-        // Read sensor data
-        float ax, ay, az; // accelerometer
-        float gx, gy, gz; // gyroscope
-        float mx, my, mz; // magnetometer
+// helper: to write int16 as little-endian into buf at index i
+static inline void put_i16_le(uint8_t *buf, int i, int16_t v)
+{
+  uint16_t u = (uint16_t)v; // reinterpret bits
+  put_u16_le(buf, i, u);
+}
 
-        imu.readAll(ax, ay, az, gx, gy, gz, mx, my, mz);
+// Helper: write int32 little-endian into buf at index i
+static inline void put_i32_le(uint8_t *buf, int i, int32_t v)
+{
+  uint32_t u = (uint32_t)v; // reinterpret bits
+  buf[i + 0] = (uint8_t)(u & 0xFF);
+  buf[i + 1] = (uint8_t)((u >> 8) & 0xFF);
+  buf[i + 2] = (uint8_t)((u >> 16) & 0xFF);
+  buf[i + 3] = (uint8_t)((u >> 24) & 0xFF);
+}
 
-        // Convert gyroscope from degrees/s to radians/s for Madgwick
-        float gx_rad = gx * DEG_TO_RAD;
-        float gy_rad = gy * DEG_TO_RAD;
-        float gz_rad = gz * DEG_TO_RAD;
+// function for sending roll, pitch and yaw frames
 
-        // Update Madgwick AHRS algorithm
-        MadgwickAHRSupdate(gx_rad, gy_rad, gz_rad, ax, ay, az, mx, my, mz);
+void send_rpy_frame(uint32_t can_id, float angle_deg, uint16_t &counter_ref)
+{
 
-        // Convert quaternion to Euler angles
-        float roll, pitch, yaw;
-        quaternionToEuler(q0, q1, q2, q3, roll, pitch, yaw);
+  // convert float to an integer, specifically an int32 since 3 digits + 4 dp = int32
+  int32_t scaled = (int32_t)lroundf(angle_deg * SCALE_RPY);
 
-        // Print the corrected Roll, Pitch, Yaw values
-        Serial.print(roll, 4);
-        Serial.print("\t");
-        Serial.print(pitch, 4);
-        Serial.print("\t");
-        Serial.println(yaw, 4);
+  CAN_message_t msg; // struct from can library
+  msg.id = can_id;   // identifier
+  msg.len = 8;       // message length
 
-        last_update = millis();
-    }
+  // putting the int32 value in bytes 0,1,2,3
+  put_i32_le(msg.buf, 0, scaled);
+
+  // putting counter in bytes 4,5
+  put_u16_le(msg.buf, 4, counter_ref);
+
+  // reserved bytes 6,7 LOL
+  msg.buf[6] = 0;
+  msg.buf[7] = 0;
+
+  Can0.write(msg); // sending acc can message
+
+  counter_ref++;
+}
+
+// function for sending pressure frames
+
+void send_pressure_frame(float pressure, uint16_t &counter_ref)
+{
+  // pressure is never negative has been assumed
+
+  float p = pressure;
+
+  // scaling by 100 to remove 2p and converting float into int16
+  uint16_t scaled = (uint16_t)lroundf(p * SCALE_PD);
+
+  CAN_message_t msg;        // struct from can library
+  msg.id = CAN_ID_PRESSURE; // identifier
+  msg.len = 8;              // message length
+
+  // putting the int16 value in bytes 0,1
+  put_u16_le(msg.buf, 0, scaled);
+
+  // putting counter in bytes 2,3
+  put_u16_le(msg.buf, 2, counter_ref);
+
+  // remaining bytes setting to 0
+  for (int i = 4; i < 8; i++)
+    msg.buf[i] = 0;
+
+  Can0.write(msg); // sending acc can message
+
+  counter_ref++;
+}
+
+void send_depth_frame(float depth_m, uint16_t &counter_ref)
+{
+  // scaling by 100 to remove 2p and converting float into int16
+  int16_t scaled = (int16_t)lroundf(depth_m * SCALE_PD);
+
+  CAN_message_t msg;     // struct from can library
+  msg.id = CAN_ID_DEPTH; // identifier
+  msg.len = 8;           // message length
+
+  // putting the int16 value in bytes 0,1
+  put_i16_le(msg.buf, 0, scaled);
+
+  // putting counter in bytes 2,3
+  put_u16_le(msg.buf, 2, counter_ref);
+
+  // rremaining bytes setting to 0
+  for (int i = 4; i < 8; i++)
+    msg.buf[i] = 0;
+
+  Can0.write(msg); // sending acc can message
+
+  counter_ref++;
+}
+
+void setup()
+{
+  //Initialize Serial, I2C, and Sensors
+  Serial.begin(115200);
+  Wire.begin();
+  imu.begin();
+  imu2.beginI2C();
+  Serial.println("9DOF IMU init OK!");
+  bar30.init();
+  Serial.println("Bar30 init OK!");
+  bar30.setFluidDensity(997); // freshwater is 997 air is 1225
+
+  Can0.begin();                  // turns on can hardware
+  Can0.setBaudRate(CAN_BITRATE); // sets can timing to match can bus - 1 mbps rn
+  Serial.println("Teensy CAN started");
+}
+
+void loop()
+{
+  // Run at 50 Hz (every 20ms)
+  if (millis() - last_update >= period_ms)
+  {
+    //read Depth sensors
+    bar30.read();
+    // Read sensor data
+    float ax, ay, az; // accelerometer
+    float gx, gy, gz; // gyroscope
+    float mx, my, mz; // magnetometer
+    float magneto[3];
+    float mag_cal[3];
+    imu.readAll(ax, ay, az, gx, gy, gz, mx, my, mz);
+    imu2.getSensorData();
+
+    float ax2 = imu2.data.accelX;
+    float ay2 = imu2.data.accelY;
+    float az2 = imu2.data.accelZ;
+
+    float gx2 = imu2.data.gyroX;
+    float gy2 = imu2.data.gyroY;
+    float gz2 = imu2.data.gyroZ;
+
+    magneto[0] = mx;
+    magneto[1] = my;
+    magneto[2] = mz;
+    mag_calibrate_ut(magneto,mag_cal);
+
+    bar30.read();
+    float roll, pitch, yaw, roll1, pitch1;
+    // Convert gyroscope from degrees/s to radians/s for Madgwick
+    float gx_rad = gx * DEG_TO_RAD;
+    float gy_rad = gy * DEG_TO_RAD;
+    float gz_rad = gz * DEG_TO_RAD;
+
+    MadgwickAHRSupdateIMU(gx2,gy2,gz2,ax2,ay2,az2);
+    quaternionToEuler(q0,q1,q2,q3,roll1, pitch1, yaw);
+    // Update Madgwick AHRS algorithm
+    MadgwickAHRSupdate(gx_rad, gy_rad, gz_rad, ax, ay, az, mag_cal[0], mag_cal[1], mag_cal[2]);
+    // Convert quaternion to Euler angles
+    
+    quaternionToEuler(q0, q1, q2, q3, roll, pitch, yaw);
+
+    
+
+    // read internal hull pressure
+    val = analogRead(A0);
+    calc = (val / 1023.0) * (3.3);
+    scaledup = calc * 1.5;
+    pres = (scaledup + 0.204) / 0.0204;
+    //Depth Value
+    float depth_m = bar30.depth();
+
+    // 3) Send 5 separate frames (one per value)
+    send_rpy_frame(CAN_ID_ROLL, roll, ctr_roll);
+    send_rpy_frame(CAN_ID_PITCH, pitch, ctr_pitch);
+    send_rpy_frame(CAN_ID_YAW, yaw, ctr_yaw);
+    send_pressure_frame(pres, ctr_pressure);
+    send_depth_frame(depth_m, ctr_depth);
+    
+    
+    //For Checking Purpose
+    Serial.print(roll1, 4);
+    Serial.print(pitch1, 4);
+    Serial.println(yaw, 4);
+    //Serial.print(pres);
+    //Serial.println(depth_m);
+    
+   
+    last_update = millis();
+  }
 }

@@ -4,6 +4,7 @@
 #include <Arduino.h>
 #include "Adafruit9DOF.h"
 #include "MadgwickAHRS.h"
+#include "SparkFun_BMI270_Arduino_Library.h"
 #include <math.h>
 
 #ifndef M_PI
@@ -13,12 +14,16 @@
 
 // Create object
 Adafruit9DOF imu;
+BMI270 imu2;
 MS5837 bar30;
 
 int val;
 float calc;
 float scaledup;
 float pres;
+float depth_ini = 0.0f;// ADDED NEW
+
+uint8_t i2cAddress = BMI2_I2C_PRIM_ADDR;
 
 // Timing for 50Hz updates
 const unsigned long period = 10; // milliseconds (50Hz)
@@ -58,7 +63,25 @@ static uint16_t ctr_pitch = 0;
 static uint16_t ctr_yaw = 0;
 static uint16_t ctr_pressure = 0;
 static uint16_t ctr_depth = 0;
+// mag hard iron and soft iron biases
+static const float bias[3] = {
+  -14.049434f,  2.764056f, -60.358348f
+};
 
+static const float Ainv[3][3] = {
+  { 1.869998f, -0.049957f, -0.064656f },
+  { -0.049957f,  1.439493f,  0.174199f },
+  { -0.064656f,  0.174199f,  1.460782f }
+};
+// callibration matrix to correct magneto 
+static void mag_calibrate_ut(float magneto[3], float cal[3]) {
+  float v0 = magneto[0] - bias[0];
+  float v1 = magneto[1] - bias[1];
+  float v2 = magneto[2] - bias[2];
+  cal[0] = Ainv[0][0]*v0 + Ainv[0][1]*v1 + Ainv[0][2]*v2;
+  cal[1] = Ainv[1][0]*v0 + Ainv[1][1]*v1 + Ainv[1][2]*v2;
+  cal[2] = Ainv[2][0]*v0 + Ainv[2][1]*v1 + Ainv[2][2]*v2;
+}
 // helpers to convert our numercial sensor values into CANBUS byte formats
 // Function to convert quaternion to Euler angles (roll, pitch, yaw)
 void quaternionToEuler(float q0, float q1, float q2, float q3, float &roll, float &pitch, float &yaw)
@@ -200,8 +223,8 @@ void setup()
   //Initialize Serial, I2C, and Sensors
   Serial.begin(115200);
   Wire.begin();
-  while (!Serial)
   imu.begin();
+  imu2.beginI2C();
   Serial.println("9DOF IMU init OK!");
   bar30.init();
   Serial.println("Bar30 init OK!");
@@ -209,6 +232,18 @@ void setup()
 
   Can0.begin();                  // turns on can hardware
   Can0.setBaudRate(CAN_BITRATE); // sets can timing to match can bus - 1 mbps rn
+   // ADDED NEW CODE - 10/02
+  const int N = 20;
+  float depth_sum = 0.0f;
+
+  for (int i = 0; i < N; i++)
+  {
+    bar30.read();                 // get fresh sensor data
+    depth_sum += bar30.depth();   
+    delay(10);                    
+  }
+
+  depth_ini = depth_sum / N;// mean of initial values so the initial reference is not a noisy value
   Serial.println("Teensy CAN started");
 }
 
@@ -223,30 +258,48 @@ void loop()
     float ax, ay, az; // accelerometer
     float gx, gy, gz; // gyroscope
     float mx, my, mz; // magnetometer
+    float magneto[3];
+    float mag_cal[3];
     imu.readAll(ax, ay, az, gx, gy, gz, mx, my, mz);
+    imu2.getSensorData();
+
+    float ax2 = imu2.data.accelX;
+    float ay2 = imu2.data.accelY;
+    float az2 = imu2.data.accelZ;
+
+    float gx2 = imu2.data.gyroX * DEG_TO_RAD;
+    float gy2 = imu2.data.gyroY * DEG_TO_RAD;
+    float gz2 = imu2.data.gyroZ * DEG_TO_RAD;
+
+    magneto[0] = mx;
+    magneto[1] = my;
+    magneto[2] = mz;
+    mag_calibrate_ut(magneto,mag_cal);
 
     bar30.read();
-
+    float roll, pitch, yaw, roll1, pitch1;
     // Convert gyroscope from degrees/s to radians/s for Madgwick
     float gx_rad = gx * DEG_TO_RAD;
     float gy_rad = gy * DEG_TO_RAD;
     float gz_rad = gz * DEG_TO_RAD;
 
+    MadgwickAHRSupdateIMU(gx2,gy2,gz2,ax2,ay2,az2);
+    quaternionToEuler(q0,q1,q2,q3,roll1, pitch1, yaw);
     // Update Madgwick AHRS algorithm
-    MadgwickAHRSupdate(gx_rad, gy_rad, gz_rad, ax, ay, az, mx, my, mz);
-
+    MadgwickAHRSupdate(gx_rad, gy_rad, gz_rad, ax2, ay2, az2, mag_cal[0], mag_cal[1], mag_cal[2]);
     // Convert quaternion to Euler angles
-    float roll, pitch, yaw;
+    
     quaternionToEuler(q0, q1, q2, q3, roll, pitch, yaw);
+
+    
 
     // read internal hull pressure
     val = analogRead(A0);
     calc = (val / 1023.0) * (3.3);
     scaledup = calc * 1.5;
     pres = (scaledup + 0.204) / 0.0204;
-
     //Depth Value
-    float depth_m = bar30.depth();
+    float depth_m = bar30.depth() - depth_ini;
 
     // 3) Send 5 separate frames (one per value)
     send_rpy_frame(CAN_ID_ROLL, roll, ctr_roll);
@@ -257,13 +310,13 @@ void loop()
     
     
     //For Checking Purpose
-    Serial.print(roll, 4);
-    Serial.print(pitch, 4);
+    Serial.print(roll1, 4);
+    Serial.print(pitch1, 4);
     Serial.println(yaw, 4);
     //Serial.print(pres);
     //Serial.println(depth_m);
     
    
-    last_update = millis();
+    last_update = millis(); 
   }
 }
