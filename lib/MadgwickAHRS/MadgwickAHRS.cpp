@@ -21,16 +21,14 @@
 //---------------------------------------------------------------------------------------------------
 // Definitions
 
-#define sampleFreq	100.0f		// sample frequency in Hz
-#define betaDef		0.03f		// 2 * proportional gain
+#define sampleFreq	50.0f		// sample frequency in Hz
+#define betaDef		0.12f		// 2 * proportional gain
 
 //---------------------------------------------------------------------------------------------------
 // Variable definitions
 
 volatile float beta = betaDef;								// 2 * proportional gain (Kp)
 volatile float q0 = 1.0f, q1 = 0.0f, q2 = 0.0f, q3 = 0.0f;	// quaternion of sensor frame relative to auxiliary frame
-
-
 
 //---------------------------------------------------------------------------------------------------
 // Function declarations
