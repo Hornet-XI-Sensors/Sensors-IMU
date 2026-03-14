@@ -3,6 +3,8 @@
 #include <Arduino.h>
 #include "Adafruit9DOF.h"
 
+//Uncomment to Log to SD Card instead of Serial
+/*
 #ifdef SDCARD_SS_PIN
 const uint8_t SD_CS_PIN = SDCARD_SS_PIN;
 #endif // SDCARD_SS_PIN
@@ -11,6 +13,8 @@ const uint8_t SD_CS_PIN = SDCARD_SS_PIN;
 
 SdFs sd;
 FsFile newFile;
+*/
+
 Adafruit9DOF imu;
 
 double prevTime = 0;
@@ -26,11 +30,14 @@ long i = 0;
 
 void setup() {
     WIRE.begin();
+    /*
     if (!sd.begin(SD_CONFIG)) {
       return;
     }
+    */
     imu.begin();
-  newFile = sd.open("mag_vals.txt", FILE_WRITE);
+    
+  //newFile = sd.open("mag_vals.txt", FILE_WRITE);
 }
 
 
@@ -41,17 +48,28 @@ void loop() {
 
     imu.readAll(ax, ay, az, gx, gy, gz, mx, my, mz);
 
+    /*
     newFile.print(mx);
     newFile.print("\t");
     newFile.print(my);
     newFile.print("\t");
     newFile.println(mz);
-  i++;
+    */
 
+    //Units is mT
+    Serial.print(mx); 
+    Serial.print("\t");
+    Serial.print(my);
+    Serial.print("\t");
+    Serial.println(mz);
+
+  //i++;
+  /*
   if (!(i % 100))
   {
     newFile.flush();
     newFile.close();
     newFile = sd.open("mag_vals.txt", FILE_WRITE);
   }
+  */
 }
